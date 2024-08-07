@@ -17,6 +17,17 @@ struct matmul_forward_dyn_quant_params {
         src_reorder(std::move(src_reorder)) {}
 };
 
+#ifdef __aarch64__
+struct reorder_cache : utils::computation_cache<ideep::tensor> {
+  ideep::tensor reordered;
+
+  reorder_cache () {}
+
+  reorder_cache(ideep::tensor reordered_) : reordered(std::move(reordered_)) {}
+};
+#endif
+
+
 // Common parameters for computation
 struct matmul_forward_params {
   dnnl::matmul::primitive_desc pd;
@@ -1264,6 +1275,15 @@ struct matmul_forward : public dnnl::matmul,
     }
   }
 
+
+#ifdef __aarch64__
+  static inline bool get_ideep_cache_matmul_reorders() {
+    static const char* ptr = std::getenv("IDEEP_CACHE_MATMUL_REORDERS");
+    static const bool value = ptr ? bool(std::atoi(ptr)) : false;
+    return value;
+  }
+#endif
+
   // For fp32 and static int8 op (int8 * int8 -> int8)
   // Set reorder flags to false if you are sure the memory layout aligns
   // with primitive descriptor. Otherwise, checks are made and reorder
@@ -1290,9 +1310,27 @@ struct matmul_forward : public dnnl::matmul,
     auto& expected_src = reorder_src ?
                          src.reorder_if_differ_in(expected_src_desc, src_attr) :
                          src;
+#ifdef __aarch64__
+    tensor expected_weights = weights;
+    if(reorder_weight) {
+      bool cache_reorders = get_ideep_cache_matmul_reorders();
+      if(cache_reorders) {
+        // Key for reorder cache
+        auto key = utils::create_key(
+          expected_weights.get_hash()
+        );
+        expected_weights = reorder_cache::fetch_or_create(key, [&]() {
+          return weights.reorder_if_differ_in(expected_wei_desc, weights_attr);
+        });
+      } else {
+        expected_weights = weights.reorder_if_differ_in(expected_wei_desc, weights_attr);
+      }
+    }
+#else
     auto& expected_weights = reorder_weight ?
                              weights.reorder_if_differ_in(expected_wei_desc, weights_attr) :
                              weights;
+#endif
     tensor scratchpad(pd.scratchpad_desc());
 
     exec_args args;
